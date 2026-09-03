@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vimutter/rowpress-lab/csvpdf"
 )
 
 func TestRunConvertsStandardStreams(t *testing.T) {
@@ -249,5 +251,61 @@ func TestRunReportsOutputCloseError(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "close output") {
 		t.Fatalf("stderr = %q, want close error", stderr.String())
+	}
+}
+
+func TestRunPassesLogoToConverter(t *testing.T) {
+	logoPath := filepath.Join(t.TempDir(), "logo.png")
+	if err := os.WriteFile(logoPath, []byte("not an image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+
+	exitCode := run(
+		context.Background(),
+		[]string{"-logo", logoPath},
+		strings.NewReader("a\n1\n"),
+		&bytes.Buffer{},
+		&stderr,
+	)
+
+	if exitCode != 1 {
+		t.Fatalf("run() exit code = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "logo") {
+		t.Fatalf("stderr = %q, want logo error", stderr.String())
+	}
+}
+
+func TestRunReportsLogoOpenError(t *testing.T) {
+	var stderr bytes.Buffer
+
+	exitCode := run(
+		context.Background(),
+		[]string{"-logo", filepath.Join(t.TempDir(), "missing.png")},
+		strings.NewReader("a\n1\n"),
+		&bytes.Buffer{},
+		&stderr,
+	)
+
+	if exitCode != 1 {
+		t.Fatalf("run() exit code = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "load logo") {
+		t.Fatalf("stderr = %q, want logo loading error", stderr.String())
+	}
+}
+
+func TestLoadLogoRejectsUnreadableAndOversizedFiles(t *testing.T) {
+	if _, err := loadLogo(t.TempDir()); err == nil {
+		t.Fatal("loadLogo() error = nil for a directory")
+	}
+
+	logoPath := filepath.Join(t.TempDir(), "large-logo.png")
+	if err := os.WriteFile(logoPath, make([]byte, csvpdf.MaxLogoBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadLogo(logoPath); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("loadLogo() error = %v, want size error", err)
 	}
 }

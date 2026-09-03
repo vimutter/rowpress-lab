@@ -24,7 +24,7 @@ type config struct {
 	outputPath string
 	title      string
 	delimiter  rune
-	logoBase64 string
+	logoPath   string
 }
 
 func main() {
@@ -64,6 +64,12 @@ func runWithOutputOpener(
 	}
 	defer closeInput()
 
+	logo, err := loadLogo(cfg.logoPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "rowpress: load logo: %v\n", err)
+		return 1
+	}
+
 	dst, closeOutput, err := openOutputFile(cfg.outputPath, stdout)
 	if err != nil {
 		fmt.Fprintf(stderr, "rowpress: open output: %v\n", err)
@@ -71,9 +77,9 @@ func runWithOutputOpener(
 	}
 
 	err = csvpdf.Convert(ctx, dst, src, csvpdf.Options{
-		Title:      cfg.title,
-		Comma:      cfg.delimiter,
-		LogoBase64: cfg.logoBase64,
+		Title: cfg.title,
+		Comma: cfg.delimiter,
+		Logo:  csvpdf.Logo{Data: logo},
 	})
 	closeErr := closeOutput()
 	if err != nil {
@@ -98,7 +104,7 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	flags.StringVar(&cfg.outputPath, "output", stdioName, "PDF output file; use - for stdout")
 	flags.StringVar(&cfg.title, "title", "", "document title")
 	flags.StringVar(&delimiter, "delimiter", ",", "single-character CSV delimiter")
-	flags.StringVar(&cfg.logoBase64, "logo-base64", "", "base64 or data-URL encoded logo")
+	flags.StringVar(&cfg.logoPath, "logo", "", "PNG, JPEG, or GIF logo file")
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, "Usage: rowpress [options]")
 		flags.PrintDefaults()
@@ -119,6 +125,27 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 
 	cfg.delimiter, _ = utf8.DecodeRuneInString(delimiter)
 	return cfg, nil
+}
+
+func loadLogo(path string) ([]byte, error) {
+	if path == "" {
+		return nil, nil
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, csvpdf.MaxLogoBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > csvpdf.MaxLogoBytes {
+		return nil, fmt.Errorf("image exceeds %d bytes", csvpdf.MaxLogoBytes)
+	}
+	return data, nil
 }
 
 func openInput(path string, stdin io.Reader) (io.Reader, func() error, error) {

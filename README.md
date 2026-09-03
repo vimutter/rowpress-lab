@@ -10,8 +10,8 @@ independent of its transport:
 
 ```go
 err := csvpdf.Convert(ctx, destination, source, csvpdf.Options{
-	Title:      "Quarterly report",
-	LogoBase64: encodedLogo,
+	Title: "Quarterly report",
+	Logo:  csvpdf.Logo{Data: logoBytes},
 })
 ```
 
@@ -33,7 +33,7 @@ go run ./cmd/rowpress \
   -input data.csv \
   -output report.pdf \
   -title "Quarterly report" \
-  -logo-base64 "iVBORw0KGgo..."
+  -logo company-logo.png
 ```
 
 Or use standard streams (`-` is the default for both paths):
@@ -45,9 +45,11 @@ cat data.csv | go run ./cmd/rowpress > report.pdf
 Use `-delimiter ';'` for a delimiter other than a comma. Run
 `go run ./cmd/rowpress -help` to see every option.
 
-The logo may be PNG, JPEG, or GIF, up to 5 MiB after decoding. Both plain
-base64 and browser-style data URLs (`data:image/png;base64,...`) are accepted,
-which lets CLI and future WebSocket callers use the same package API.
+The CLI reads a normal PNG, JPEG, or GIF file with `-logo`; users do not need
+to keep base64 files on disk. Logos may be up to 5 MiB and 4096 pixels in
+either dimension. Binary callers use `csvpdf.Logo{Data: imageBytes}`. Future
+WebSocket callers can use `csvpdf.Logo{Base64: encodedImage}`, with either
+plain base64 or a browser-style data URL (`data:image/png;base64,...`).
 
 ## Tests and coverage
 

@@ -1,10 +1,16 @@
 package csvpdf
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"strings"
 	"unicode/utf8"
@@ -19,6 +25,10 @@ const (
 	headerFillR  = 225
 	headerFillG  = 231
 	headerFillB  = 239
+	logoMaxWidth = 32.0
+	logoMaxHeight = 16.0
+	logoGap       = 5.0
+	maxLogoBytes  = 5 << 20
 )
 
 // Options controls the generated document. Zero values produce a usable PDF.
@@ -28,6 +38,17 @@ type Options struct {
 
 	// Comma is the CSV field delimiter. A zero value means a comma.
 	Comma rune
+
+	// LogoBase64 is an optional PNG, JPEG, or GIF logo. It accepts either raw
+	// base64 or a data URL such as "data:image/png;base64,...".
+	LogoBase64 string
+}
+
+type logoImage struct {
+	data   []byte
+	format string
+	width  int
+	height int
 }
 
 // Convert reads CSV records from src and writes a PDF document to dst.
@@ -45,6 +66,11 @@ func Convert(ctx context.Context, dst io.Writer, src io.Reader, opts Options) er
 		return errors.New("csvpdf: nil source")
 	}
 
+	logo, err := decodeLogo(opts.LogoBase64)
+	if err != nil {
+		return fmt.Errorf("csvpdf: logo: %w", err)
+	}
+
 	reader := csv.NewReader(src)
 	if opts.Comma != 0 {
 		reader.Comma = opts.Comma
@@ -57,12 +83,11 @@ func Convert(ctx context.Context, dst io.Writer, src io.Reader, opts Options) er
 	if err != nil {
 		return fmt.Errorf("csvpdf: read header: %w", err)
 	}
-	if len(header) == 0 {
-		return errors.New("csvpdf: CSV header has no fields")
-	}
-
 	reader.FieldsPerRecord = len(header)
-	doc := newDocument(opts, len(header))
+	doc, err := newDocument(opts, len(header), logo)
+	if err != nil {
+		return fmt.Errorf("csvpdf: create document: %w", err)
+	}
 	drawHeader(doc, header)
 
 	for recordNumber := 2; ; recordNumber++ {
@@ -97,7 +122,7 @@ func readRecord(ctx context.Context, reader *csv.Reader) ([]string, error) {
 	return reader.Read()
 }
 
-func newDocument(opts Options, columns int) *fpdf.Fpdf {
+func newDocument(opts Options, columns int, logo *logoImage) (*fpdf.Fpdf, error) {
 	orientation := "P"
 	if columns > 5 {
 		orientation = "L"
@@ -108,10 +133,83 @@ func newDocument(opts Options, columns int) *fpdf.Fpdf {
 	doc.SetAutoPageBreak(false, pageMargin)
 	doc.SetTitle(title(opts), false)
 	doc.AddPage()
+
+	headingHeight := 10.0
+	titleWidth := 0.0
+	if logo != nil {
+		logoWidth, logoHeight := fitDimensions(
+		float64(logo.width),
+		float64(logo.height),
+		logoMaxWidth,
+		logoMaxHeight,
+		)
+		imageOptions := fpdf.ImageOptions{ImageType: logo.format, ReadDpi: true}
+		doc.RegisterImageOptionsReader("logo", imageOptions, bytes.NewReader(logo.data))
+		if err := doc.Error(); err != nil {
+			return nil, fmt.Errorf("register logo: %w", err)
+		}
+
+		pageWidth, _ := doc.GetPageSize()
+		doc.ImageOptions(
+			"logo",
+			pageWidth-pageMargin-logoWidth,
+			pageMargin,
+			logoWidth,
+			logoHeight,
+			false,
+			imageOptions,
+			0,
+			"",
+		)
+		headingHeight = max(headingHeight, logoHeight)
+		titleWidth = pageWidth - 2*pageMargin - logoWidth - logoGap
+	}
+
 	doc.SetFont("Helvetica", "B", 16)
-	doc.CellFormat(0, 10, title(opts), "", 1, "L", false, 0, "")
+	doc.CellFormat(titleWidth, headingHeight, title(opts), "", 1, "L", false, 0, "")
 	doc.Ln(2)
-	return doc
+	return doc, nil
+}
+
+func decodeLogo(encoded string) (*logoImage, error) {
+	encoded = strings.TrimSpace(encoded)
+	if encoded == "" {
+		return nil, nil
+	}
+	if strings.HasPrefix(strings.ToLower(encoded), "data:") {
+		metadata, payload, found := strings.Cut(encoded, ",")
+		if !found || !strings.HasSuffix(strings.ToLower(metadata), ";base64") {
+			return nil, errors.New("data URL must contain base64 data")
+		}
+		encoded = strings.TrimSpace(payload)
+	}
+	if base64.StdEncoding.DecodedLen(len(encoded)) > maxLogoBytes {
+		return nil, fmt.Errorf("decoded image exceeds %d bytes", maxLogoBytes)
+	}
+
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("decode base64: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, errors.New("image is empty")
+	}
+
+	config, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("decode image: %w", err)
+	}
+	return &logoImage{
+		data:   data,
+		format: format,
+		width:  config.Width,
+		height: config.Height,
+	}, nil
+}
+
+func fitDimensions(width, height, maxWidth, maxHeight float64) (float64, float64) {
+	scale := min(1, maxWidth/width, maxHeight/height)
+	return width * scale, height * scale
 }
 
 func title(opts Options) string {

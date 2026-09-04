@@ -15,6 +15,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 FROM scratch
 
 COPY --from=build /out/rowpress-server /rowpress-server
+COPY THIRD_PARTY_NOTICES.md /THIRD_PARTY_NOTICES.md
 
 USER 65532:65532
 EXPOSE 10000

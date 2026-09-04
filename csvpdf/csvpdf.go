@@ -16,6 +16,8 @@ import (
 	"unicode/utf8"
 
 	"codeberg.org/go-pdf/fpdf"
+	"github.com/go-fonts/dejavu/dejavusans"
+	"github.com/go-fonts/dejavu/dejavusansbold"
 )
 
 const (
@@ -29,6 +31,7 @@ const (
 	logoMaxHeight    = 16.0
 	logoGap          = 5.0
 	maxLogoDimension = 4096
+	fontFamily       = "DejaVu"
 )
 
 // MaxLogoBytes is the largest decoded logo accepted by Convert.
@@ -142,9 +145,11 @@ func newDocument(opts Options, columns int, logo *logoImage) (*fpdf.Fpdf, error)
 	}
 
 	doc := fpdf.New(orientation, "mm", "A4", "")
+	doc.AddUTF8FontFromBytes(fontFamily, "", dejavusans.TTF)
+	doc.AddUTF8FontFromBytes(fontFamily, "B", dejavusansbold.TTF)
 	doc.SetMargins(pageMargin, pageMargin, pageMargin)
 	doc.SetAutoPageBreak(false, pageMargin)
-	doc.SetTitle(title(opts), false)
+	doc.SetTitle(title(opts), true)
 	doc.AddPage()
 
 	headingHeight := 10.0
@@ -159,7 +164,7 @@ func newDocument(opts Options, columns int, logo *logoImage) (*fpdf.Fpdf, error)
 		titleWidth = pageWidth - 2*pageMargin - logoWidth - logoGap
 	}
 
-	doc.SetFont("Helvetica", "B", 16)
+	doc.SetFont(fontFamily, "B", 16)
 	titleText := title(opts)
 	if titleWidth > 0 {
 		titleText = fitText(doc, titleText, titleWidth-2)
@@ -265,13 +270,13 @@ func title(opts Options) string {
 }
 
 func drawHeader(doc *fpdf.Fpdf, fields []string) {
-	doc.SetFont("Helvetica", "B", 9)
+	doc.SetFont(fontFamily, "B", 9)
 	doc.SetFillColor(headerFillR, headerFillG, headerFillB)
 	drawCells(doc, fields, true)
 }
 
 func drawRow(doc *fpdf.Fpdf, fields []string) {
-	doc.SetFont("Helvetica", "", 9)
+	doc.SetFont(fontFamily, "", 9)
 	drawCells(doc, fields, false)
 }
 

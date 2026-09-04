@@ -32,6 +32,24 @@ func TestConvertWritesPDF(t *testing.T) {
 	}
 }
 
+func TestConvertEmbedsUnicodeFont(t *testing.T) {
+	input := strings.NewReader("Город,Χώρα,Status\nБерлин,Γερμανία,✓ готово\n")
+	var output bytes.Buffer
+
+	err := csvpdf.Convert(
+		context.Background(),
+		&output,
+		input,
+		csvpdf.Options{Title: "Отчёт — Αναφορά"},
+	)
+	if err != nil {
+		t.Fatalf("Convert() error = %v", err)
+	}
+	if !bytes.Contains(output.Bytes(), []byte("/ToUnicode")) {
+		t.Fatal("PDF does not contain an embedded Unicode character map")
+	}
+}
+
 func TestConvertRejectsEmptyInput(t *testing.T) {
 	var output bytes.Buffer
 

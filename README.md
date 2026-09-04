@@ -19,10 +19,11 @@ err := csvpdf.Convert(ctx, destination, source, csvpdf.Options{
 - `destination` is an `io.Writer`: a file, stdout, a buffer, or a response.
 - the caller owns both values and is responsible for closing them.
 
-The current first slice renders the first record as a repeated table header,
-paginates rows, validates consistent field counts, and truncates cells that do
-not fit. The built-in PDF font currently limits reliable text rendering to its
-Latin character set; embedded Unicode fonts are a future milestone.
+The package renders the first record as a repeated table header, paginates
+rows, validates consistent field counts, and truncates cells that do not fit.
+It embeds DejaVu Sans regular and bold for UTF-8 text, including Latin, Greek,
+Cyrillic, and many common symbols. It does not yet provide CJK font fallback or
+complex-script shaping.
 
 ## CLI
 
@@ -86,6 +87,11 @@ BASIC_AUTH_USERNAME=demo BASIC_AUTH_PASSWORD='choose-a-long-password' \
 
 Leaving both unset disables authentication. Setting only one makes the server
 refuse to start, which avoids silently running an unprotected deployment.
+
+The server emits structured JSON logs to stdout. Render captures them without
+extra configuration. Conversion logs contain request IDs, timings, and sizes,
+but never CSV or logo contents; deployment details are in the
+[Render guide](docs/render.md).
 
 Build and run the production container:
 

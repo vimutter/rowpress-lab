@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -34,13 +35,14 @@ func main() {
 }
 
 func runServer(ctx context.Context, port string, stderr io.Writer) int {
-	return runServerWith(ctx, port, stderr, net.Listen, serve)
+	return runServerWith(ctx, port, stderr, newLogger(os.Stdout), net.Listen, serve)
 }
 
 func runServerWith(
 	ctx context.Context,
 	port string,
 	stderr io.Writer,
+	logger *slog.Logger,
 	listen listenFunc,
 	serveHTTP serveFunc,
 ) int {
@@ -60,15 +62,22 @@ func runServerWith(
 	}
 
 	server := &http.Server{
-		Handler:           newHandler(ctx, auth),
+		Handler:           newHandler(ctx, auth, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
+	logger.Info("server_started", "address", listener.Addr().String(), "basic_auth", auth.username != "")
 	if err := serveHTTP(ctx, server, listener); err != nil {
+		logger.Error("server_failed", "error", err)
 		fmt.Fprintf(stderr, "rowpress-server: serve: %v\n", err)
 		return 1
 	}
+	logger.Info("server_stopped")
 	return 0
+}
+
+func newLogger(output io.Writer) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(output, &slog.HandlerOptions{Level: slog.LevelInfo}))
 }
 
 func basicAuthFromEnvironment() (basicAuthConfig, error) {

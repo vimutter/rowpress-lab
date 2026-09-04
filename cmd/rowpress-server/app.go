@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -59,16 +60,16 @@ type socket interface {
 	SetReadLimit(int64)
 }
 
-func newHandler(appContext context.Context, auth basicAuthConfig) http.Handler {
+func newHandler(appContext context.Context, auth basicAuthConfig, logger *slog.Logger) http.Handler {
 	protected := http.NewServeMux()
 	protected.HandleFunc("GET /{$}", serveIndex)
 	protected.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
-		serveWebSocket(appContext, w, r)
+		serveWebSocket(appContext, logger, w, r)
 	})
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", serveHealth)
-	mux.Handle("/", basicAuth(auth, protected))
+	mux.Handle("/", basicAuth(auth, logger, protected))
 	return securityHeaders(mux)
 }
 
@@ -84,7 +85,7 @@ func serveHealth(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok\n"))
 }
 
-func basicAuth(config basicAuthConfig, next http.Handler) http.Handler {
+func basicAuth(config basicAuthConfig, logger *slog.Logger, next http.Handler) http.Handler {
 	if config.username == "" && config.password == "" {
 		return next
 	}
@@ -98,6 +99,7 @@ func basicAuth(config basicAuthConfig, next http.Handler) http.Handler {
 		credentialsMatch := subtle.ConstantTimeCompare(gotUsername[:], wantUsername[:]) &
 			subtle.ConstantTimeCompare(gotPassword[:], wantPassword[:])
 		if !ok || credentialsMatch != 1 {
+			logger.Warn("authentication_failed", "path", r.URL.Path)
 			w.Header().Set("WWW-Authenticate", `Basic realm="Rowpress", charset="UTF-8"`)
 			http.Error(w, "authentication required", http.StatusUnauthorized)
 			return
@@ -115,19 +117,23 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-func serveWebSocket(appContext context.Context, w http.ResponseWriter, r *http.Request) {
+func serveWebSocket(appContext context.Context, logger *slog.Logger, w http.ResponseWriter, r *http.Request) {
 	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		CompressionMode: websocket.CompressionDisabled,
 	})
 	if err != nil {
+		logger.Warn("websocket_accept_failed", "error", err)
 		return
 	}
 	defer connection.CloseNow()
 	connection.SetReadLimit(maxMessageBytes)
-	runSession(appContext, connection)
+	started := time.Now()
+	logger.Info("websocket_connected")
+	runSession(appContext, logger, connection)
+	logger.Info("websocket_disconnected", "duration_ms", time.Since(started).Milliseconds())
 }
 
-func runSession(appContext context.Context, connection socket) {
+func runSession(appContext context.Context, logger *slog.Logger, connection socket) {
 	ctx, cancel := context.WithCancel(appContext)
 	heartbeatFinished := make(chan struct{})
 	go func() {
@@ -148,14 +154,14 @@ func runSession(appContext context.Context, connection socket) {
 	}
 
 	for {
-		keepGoing, err := handleNextRequest(ctx, connection)
+		keepGoing, err := handleNextRequest(ctx, logger, connection)
 		if err != nil || !keepGoing {
 			return
 		}
 	}
 }
 
-func handleNextRequest(appContext context.Context, connection socket) (bool, error) {
+func handleNextRequest(appContext context.Context, logger *slog.Logger, connection socket) (bool, error) {
 	messageType, data, err := connection.Read(appContext)
 	if err != nil {
 		return false, nil
@@ -195,14 +201,33 @@ func handleNextRequest(appContext context.Context, connection socket) (bool, err
 		return false, err
 	}
 
+	started := time.Now()
+	logger.Info(
+		"conversion_started",
+		"request_id", request.ID,
+		"csv_bytes", len(request.CSV),
+		"logo_base64_bytes", len(request.LogoBase64),
+	)
 	pdf, err := convertPDF(appContext, request)
 	if err != nil {
+		logger.Warn(
+			"conversion_failed",
+			"request_id", request.ID,
+			"duration_ms", time.Since(started).Milliseconds(),
+			"error", err,
+		)
 		return true, writeServerMessage(appContext, connection, serverMessage{
 			Type:  "error",
 			ID:    request.ID,
 			Error: err.Error(),
 		})
 	}
+	logger.Info(
+		"conversion_completed",
+		"request_id", request.ID,
+		"duration_ms", time.Since(started).Milliseconds(),
+		"pdf_bytes", len(pdf),
+	)
 	return true, connection.Write(appContext, websocket.MessageBinary, pdf)
 }
 

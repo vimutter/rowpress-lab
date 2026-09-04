@@ -66,7 +66,7 @@ func TestRunServerReportsInvalidAuthConfiguration(t *testing.T) {
 	t.Setenv("BASIC_AUTH_USERNAME", "demo")
 	t.Setenv("BASIC_AUTH_PASSWORD", "")
 	var stderr strings.Builder
-	if code := runServerWith(context.Background(), "1234", &stderr, nil, nil); code != 1 {
+	if code := runServerWith(context.Background(), "1234", &stderr, newLogger(io.Discard), nil, nil); code != 1 {
 		t.Fatalf("runServerWith() = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "configuration") {
@@ -82,7 +82,7 @@ func TestRunServerWithUsesDefaultPortAndReturnsSuccess(t *testing.T) {
 	}
 	serveHTTP := func(context.Context, *http.Server, net.Listener) error { return nil }
 
-	if code := runServerWith(context.Background(), "", &strings.Builder{}, listen, serveHTTP); code != 0 {
+	if code := runServerWith(context.Background(), "", &strings.Builder{}, newLogger(io.Discard), listen, serveHTTP); code != 0 {
 		t.Fatalf("runServerWith() = %d, want 0", code)
 	}
 	if address != "0.0.0.0:"+defaultPort {
@@ -95,7 +95,7 @@ func TestRunServerWithReportsServeError(t *testing.T) {
 	serveHTTP := func(context.Context, *http.Server, net.Listener) error { return errors.New("serve failed") }
 	var stderr strings.Builder
 
-	if code := runServerWith(context.Background(), "1234", &stderr, listen, serveHTTP); code != 1 {
+	if code := runServerWith(context.Background(), "1234", &stderr, newLogger(io.Discard), listen, serveHTTP); code != 1 {
 		t.Fatalf("runServerWith() = %d, want 1", code)
 	}
 	if !strings.Contains(stderr.String(), "serve failed") {

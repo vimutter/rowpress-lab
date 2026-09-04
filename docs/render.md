@@ -52,6 +52,19 @@ and its `ENTRYPOINT`.
 - The server keeps uploaded data in memory and does not require a persistent
   disk.
 
+## Logs
+
+The server writes newline-delimited JSON application logs to stdout with Go's
+standard `log/slog` package. Render captures stdout and stderr automatically;
+open the service's **Logs** page to search or live-tail them. Logged events
+include server lifecycle, authentication failures, WebSocket lifecycle, and
+conversion start/completion/failure with request ID, duration, and byte counts.
+
+CSV data, logo data, titles, passwords, and authorization headers are not
+logged. Render's built-in retention is enough for this demo. A larger service
+can stream the same JSON logs to an external provider without changing the
+application logger.
+
 ## Manual alternative
 
 Instead of a Blueprint, choose **New → Web Service**, select the GitHub

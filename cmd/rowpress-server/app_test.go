@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,7 +20,7 @@ import (
 )
 
 func TestHTTPRoutesAndSecurityHeaders(t *testing.T) {
-	handler := newHandler(context.Background(), basicAuthConfig{})
+	handler := newHandler(context.Background(), basicAuthConfig{}, newLogger(io.Discard))
 
 	index := httptest.NewRecorder()
 	handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -44,7 +45,7 @@ func TestHTTPRoutesAndSecurityHeaders(t *testing.T) {
 }
 
 func TestBasicAuthProtectsAppButNotHealthCheck(t *testing.T) {
-	handler := newHandler(context.Background(), basicAuthConfig{username: "demo", password: "secret"})
+	handler := newHandler(context.Background(), basicAuthConfig{username: "demo", password: "secret"}, newLogger(io.Discard))
 
 	unauthorized := httptest.NewRecorder()
 	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -118,7 +119,7 @@ func TestConvertPDFRejectsInvalidOptions(t *testing.T) {
 }
 
 func TestPersistentWebSocketConvertsMultipleFiles(t *testing.T) {
-	server := httptest.NewServer(newHandler(context.Background(), basicAuthConfig{}))
+	server := httptest.NewServer(newHandler(context.Background(), basicAuthConfig{}, newLogger(io.Discard)))
 	defer server.Close()
 	connection := dialWebSocket(t, server.URL)
 	defer connection.CloseNow()
@@ -150,7 +151,7 @@ func TestPersistentWebSocketConvertsMultipleFiles(t *testing.T) {
 }
 
 func TestBasicAuthProtectsWebSocketUpgrade(t *testing.T) {
-	server := httptest.NewServer(newHandler(context.Background(), basicAuthConfig{username: "demo", password: "secret"}))
+	server := httptest.NewServer(newHandler(context.Background(), basicAuthConfig{username: "demo", password: "secret"}, newLogger(io.Discard)))
 	defer server.Close()
 	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
 
@@ -180,7 +181,7 @@ func TestBasicAuthProtectsWebSocketUpgrade(t *testing.T) {
 }
 
 func TestPersistentWebSocketReportsErrorsAndContinues(t *testing.T) {
-	server := httptest.NewServer(newHandler(context.Background(), basicAuthConfig{}))
+	server := httptest.NewServer(newHandler(context.Background(), basicAuthConfig{}, newLogger(io.Discard)))
 	defer server.Close()
 	connection := dialWebSocket(t, server.URL)
 	defer connection.CloseNow()
@@ -230,7 +231,7 @@ func TestHandleNextRequestReturnsWriteErrors(t *testing.T) {
 		reads:        []fakeRead{{messageType: websocket.MessageText, data: request}},
 		writeErrorAt: 1,
 	}
-	keepGoing, err := handleNextRequest(context.Background(), connection)
+	keepGoing, err := handleNextRequest(context.Background(), newLogger(io.Discard), connection)
 	if keepGoing || err == nil {
 		t.Fatalf("handleNextRequest() = %v, %v; want write error", keepGoing, err)
 	}
@@ -239,15 +240,36 @@ func TestHandleNextRequestReturnsWriteErrors(t *testing.T) {
 		reads:        []fakeRead{{messageType: websocket.MessageText, data: request}},
 		writeErrorAt: 2,
 	}
-	keepGoing, err = handleNextRequest(context.Background(), connection)
+	keepGoing, err = handleNextRequest(context.Background(), newLogger(io.Discard), connection)
 	if !keepGoing || err == nil {
 		t.Fatalf("handleNextRequest() = %v, %v; want PDF write error", keepGoing, err)
 	}
 }
 
+func TestConversionLogsMetadataNotCSVContents(t *testing.T) {
+	request := convertRequest{Type: "convert", ID: "logged-job", CSV: "name\nprivate-cell-value\n"}
+	connection := &fakeSocket{
+		reads: []fakeRead{{messageType: websocket.MessageText, data: marshal(t, request)}},
+	}
+	var logs strings.Builder
+
+	keepGoing, err := handleNextRequest(context.Background(), newLogger(&logs), connection)
+	if err != nil || !keepGoing {
+		t.Fatalf("handleNextRequest() = %v, %v", keepGoing, err)
+	}
+	if !strings.Contains(logs.String(), `"msg":"conversion_started"`) ||
+		!strings.Contains(logs.String(), `"msg":"conversion_completed"`) ||
+		!strings.Contains(logs.String(), `"request_id":"logged-job"`) {
+		t.Fatalf("conversion metadata missing from logs: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "private-cell-value") {
+		t.Fatalf("CSV contents leaked into logs: %s", logs.String())
+	}
+}
+
 func TestRunSessionStopsWhenReadyCannotBeWritten(t *testing.T) {
 	connection := &fakeSocket{writeErrorAt: 1}
-	runSession(context.Background(), connection)
+	runSession(context.Background(), newLogger(io.Discard), connection)
 	if connection.closeCalls == 0 {
 		t.Fatal("runSession() did not close the connection")
 	}

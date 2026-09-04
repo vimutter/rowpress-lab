@@ -1,0 +1,7 @@
+.git
+.github
+coverage.*
+*.out
+*.pdf
+Dockerfile*
+README.md

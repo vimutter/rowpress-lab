@@ -39,3 +39,6 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      - name: Build container
+        run: docker build --tag rowpress:test .

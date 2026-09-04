@@ -1,7 +1,7 @@
 # rowpress-lab
 
 A learning project that converts CSV tables to PDF through a reusable Go
-package, with CLI and WebSocket front ends planned.
+package, with CLI and WebSocket front ends.
 
 ## Core package
 
@@ -47,8 +47,8 @@ Use `-delimiter ';'` for a delimiter other than a comma. Run
 
 The CLI reads a normal PNG, JPEG, or GIF file with `-logo`; users do not need
 to keep base64 files on disk. Logos may be up to 5 MiB and 4096 pixels in
-either dimension. Binary callers use `csvpdf.Logo{Data: imageBytes}`. Future
-WebSocket callers can use `csvpdf.Logo{Base64: encodedImage}`, with either
+either dimension. Binary callers use `csvpdf.Logo{Data: imageBytes}`. WebSocket
+callers can use `csvpdf.Logo{Base64: encodedImage}`, with either
 plain base64 or a browser-style data URL (`data:image/png;base64,...`).
 
 ## Tests and coverage
@@ -62,3 +62,38 @@ make coverage         # writes coverage.out and browsable coverage.html
 make coverage-check   # fails below COVERAGE_MIN (100% by default)
 make coverage-check COVERAGE_MIN=90
 ```
+
+## Web app
+
+Run the browser interface locally:
+
+```sh
+go run ./cmd/rowpress-server
+```
+
+Then open <http://localhost:10000>. Select a CSV and optional logo; the page
+opens a persistent WebSocket session, displays its connection state, and
+downloads each binary PDF response. You can convert multiple files without
+reconnecting. Set `PORT` to listen on a different port. The protocol is
+documented in [docs/websocket.md](docs/websocket.md).
+
+Basic Auth is optional locally. Set both variables to enable it:
+
+```sh
+BASIC_AUTH_USERNAME=demo BASIC_AUTH_PASSWORD='choose-a-long-password' \
+  go run ./cmd/rowpress-server
+```
+
+Leaving both unset disables authentication. Setting only one makes the server
+refuse to start, which avoids silently running an unprotected deployment.
+
+Build and run the production container:
+
+```sh
+docker build -t rowpress .
+docker run --rm -p 10000:10000 rowpress
+```
+
+`render.yaml` defines the Render web service, Frankfurt region, health check,
+free plan, and automatic deployments after the GitHub checks pass. See the
+[Render deployment guide](docs/render.md) for the account and Dashboard steps.

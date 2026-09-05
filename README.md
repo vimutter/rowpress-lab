@@ -27,10 +27,11 @@ complex-script shaping.
 
 ## CLI
 
-Convert files:
+Convert CSV to PDF (the explicit `csv-to-pdf` command is optional for backward
+compatibility):
 
 ```sh
-go run ./cmd/rowpress \
+go run ./cmd/rowpress csv-to-pdf \
   -input data.csv \
   -output report.pdf \
   -title "Quarterly report" \
@@ -52,6 +53,21 @@ either dimension. Binary callers use `csvpdf.Logo{Data: imageBytes}`. WebSocket
 callers can use `csvpdf.Logo{Base64: encodedImage}`, with either
 plain base64 or a browser-style data URL (`data:image/png;base64,...`).
 
+Convert a PDF table back to canonical CSV with the OpenAI Responses API:
+
+```sh
+export OPENAI_API_KEY='your-project-key'
+
+go run ./cmd/rowpress pdf-to-csv \
+  -input report.pdf \
+  -output recovered.csv
+```
+
+The default model is `gpt-5.6-luna`. Override it with `-model` or
+`OPENAI_MODEL`. The API key has no command-line flag, so it does not leak into
+shell history or process listings. See [PDF-to-CSV design and fidelity](docs/pdf-to-csv.md)
+for the API flow, testing approach, and round-trip limits.
+
 ## Tests and coverage
 
 Go includes statement coverage in its standard toolchain; no coverage library
@@ -65,6 +81,11 @@ make coverage-check COVERAGE_MIN=90
 ```
 
 ## Web app
+
+The page supports both **CSV → PDF** and **PDF → CSV**. To enable PDF extraction,
+set `OPENAI_API_KEY` on the server (in Render's environment for deployment).
+Optionally set `OPENAI_MODEL`. Without a key, CSV → PDF still works.
+PDFs are sent to OpenAI; review extracted values before using them.
 
 Run the browser interface locally:
 

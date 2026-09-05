@@ -8,23 +8,36 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/vimutter/rowpress-lab/csvpdf"
+	"github.com/vimutter/rowpress-lab/pdfcsv"
 )
 
 const stdioName = "-"
 
+type conversionMode string
+
+const (
+	csvToPDF conversionMode = "csv-to-pdf"
+	pdfToCSV conversionMode = "pdf-to-csv"
+)
+
 var exitProcess = os.Exit
 
 type outputOpener func(string, io.Writer) (io.Writer, func() error, error)
+type extractorFactory func(string, string) (pdfcsv.Extractor, error)
 
 type config struct {
+	mode       conversionMode
 	inputPath  string
 	outputPath string
 	title      string
 	delimiter  rune
 	logoPath   string
+	model      string
 }
 
 func main() {
@@ -35,7 +48,7 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	return runWithOutputOpener(ctx, args, stdin, stdout, stderr, openOutput)
+	return runWithDependencies(ctx, args, stdin, stdout, stderr, openOutput, newOpenAIExtractor)
 }
 
 func runWithOutputOpener(
@@ -44,6 +57,17 @@ func runWithOutputOpener(
 	stdin io.Reader,
 	stdout, stderr io.Writer,
 	openOutputFile outputOpener,
+) int {
+	return runWithDependencies(ctx, args, stdin, stdout, stderr, openOutputFile, newOpenAIExtractor)
+}
+
+func runWithDependencies(
+	ctx context.Context,
+	args []string,
+	stdin io.Reader,
+	stdout, stderr io.Writer,
+	openOutputFile outputOpener,
+	newExtractor extractorFactory,
 ) int {
 	cfg, err := parseFlags(args, stderr)
 	if errors.Is(err, flag.ErrHelp) {
@@ -64,10 +88,25 @@ func runWithOutputOpener(
 	}
 	defer closeInput()
 
-	logo, err := loadLogo(cfg.logoPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "rowpress: load logo: %v\n", err)
-		return 1
+	var logo []byte
+	var extractor pdfcsv.Extractor
+	if cfg.mode == csvToPDF {
+		logo, err = loadLogo(cfg.logoPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "rowpress: load logo: %v\n", err)
+			return 1
+		}
+	} else {
+		apiKey := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+		if apiKey == "" {
+			fmt.Fprintln(stderr, "rowpress: OPENAI_API_KEY is required for pdf-to-csv")
+			return 1
+		}
+		extractor, err = newExtractor(apiKey, cfg.model)
+		if err != nil {
+			fmt.Fprintf(stderr, "rowpress: configure OpenAI: %v\n", err)
+			return 1
+		}
 	}
 
 	dst, closeOutput, err := openOutputFile(cfg.outputPath, stdout)
@@ -76,11 +115,22 @@ func runWithOutputOpener(
 		return 1
 	}
 
-	err = csvpdf.Convert(ctx, dst, src, csvpdf.Options{
-		Title: cfg.title,
-		Comma: cfg.delimiter,
-		Logo:  csvpdf.Logo{Data: logo},
-	})
+	if cfg.mode == csvToPDF {
+		err = csvpdf.Convert(ctx, dst, src, csvpdf.Options{
+			Title: cfg.title,
+			Comma: cfg.delimiter,
+			Logo:  csvpdf.Logo{Data: logo},
+		})
+	} else {
+		filename := "document.pdf"
+		if cfg.inputPath != stdioName {
+			filename = filepath.Base(cfg.inputPath)
+		}
+		err = pdfcsv.Convert(ctx, dst, src, extractor, pdfcsv.Options{
+			Filename: filename,
+			Comma:    cfg.delimiter,
+		})
+	}
 	closeErr := closeOutput()
 	if err != nil {
 		fmt.Fprintln(stderr, "rowpress:", err)
@@ -95,18 +145,33 @@ func runWithOutputOpener(
 }
 
 func parseFlags(args []string, stderr io.Writer) (config, error) {
-	var cfg config
+	cfg := config{mode: csvToPDF}
+	if len(args) > 0 && (args[0] == string(csvToPDF) || args[0] == string(pdfToCSV)) {
+		cfg.mode = conversionMode(args[0])
+		args = args[1:]
+	}
 	var delimiter string
 
 	flags := flag.NewFlagSet("rowpress", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	flags.StringVar(&cfg.inputPath, "input", stdioName, "CSV input file; use - for stdin")
-	flags.StringVar(&cfg.outputPath, "output", stdioName, "PDF output file; use - for stdout")
-	flags.StringVar(&cfg.title, "title", "", "document title")
-	flags.StringVar(&delimiter, "delimiter", ",", "single-character CSV delimiter")
-	flags.StringVar(&cfg.logoPath, "logo", "", "PNG, JPEG, or GIF logo file")
+	if cfg.mode == csvToPDF {
+		flags.StringVar(&cfg.inputPath, "input", stdioName, "CSV input file; use - for stdin")
+		flags.StringVar(&cfg.outputPath, "output", stdioName, "PDF output file; use - for stdout")
+		flags.StringVar(&cfg.title, "title", "", "document title")
+		flags.StringVar(&cfg.logoPath, "logo", "", "PNG, JPEG, or GIF logo file")
+		flags.StringVar(&delimiter, "delimiter", ",", "single-character input CSV delimiter")
+	} else {
+		flags.StringVar(&cfg.inputPath, "input", stdioName, "PDF input file; use - for stdin")
+		flags.StringVar(&cfg.outputPath, "output", stdioName, "CSV output file; use - for stdout")
+		flags.StringVar(&delimiter, "delimiter", ",", "single-character output CSV delimiter")
+		model := strings.TrimSpace(os.Getenv("OPENAI_MODEL"))
+		if model == "" {
+			model = pdfcsv.DefaultModel
+		}
+		flags.StringVar(&cfg.model, "model", model, "OpenAI model")
+	}
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: rowpress [options]")
+		fmt.Fprintf(stderr, "Usage: rowpress %s [options]\n", cfg.mode)
 		flags.PrintDefaults()
 	}
 
@@ -125,6 +190,10 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 
 	cfg.delimiter, _ = utf8.DecodeRuneInString(delimiter)
 	return cfg, nil
+}
+
+func newOpenAIExtractor(apiKey, model string) (pdfcsv.Extractor, error) {
+	return pdfcsv.NewOpenAIExtractor(pdfcsv.OpenAIOptions{APIKey: apiKey, Model: model})
 }
 
 func loadLogo(path string) ([]byte, error) {

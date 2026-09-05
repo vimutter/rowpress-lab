@@ -1,5 +1,10 @@
 # Deploying Rowpress on Render
 
+To enable PDF → CSV, set the secret `OPENAI_API_KEY` in your Render service's
+environment and redeploy. Optionally set `OPENAI_MODEL`. The key is only used
+on the server. Without it, the page still supports CSV → PDF.
+The Docker image includes CA certificates for outbound HTTPS to OpenAI.
+
 The repository includes a Dockerfile and a `render.yaml` Blueprint. No database
 or persistent disk is required. Render provides `PORT`; the server defaults to
 port 10000 when it is absent locally.

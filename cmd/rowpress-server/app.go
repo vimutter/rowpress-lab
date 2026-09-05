@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/vimutter/rowpress-lab/csvpdf"
+	"github.com/vimutter/rowpress-lab/pdfcsv"
 )
 
 const (
@@ -38,13 +40,15 @@ type convertRequest struct {
 	Delimiter  string `json:"delimiter"`
 	CSV        string `json:"csv"`
 	LogoBase64 string `json:"logo_base64"`
+	PDFBase64  string `json:"pdf_base64"`
 }
 
 type serverMessage struct {
-	Type    string `json:"type"`
-	ID      string `json:"id,omitempty"`
-	Message string `json:"message,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Type     string `json:"type"`
+	ID       string `json:"id,omitempty"`
+	Message  string `json:"message,omitempty"`
+	Error    string `json:"error,omitempty"`
+	PDFToCSV bool   `json:"pdf_to_csv,omitempty"`
 }
 
 type basicAuthConfig struct {
@@ -61,10 +65,14 @@ type socket interface {
 }
 
 func newHandler(appContext context.Context, auth basicAuthConfig, logger *slog.Logger) http.Handler {
+	return newHandlerWithExtractor(appContext, auth, logger, nil)
+}
+
+func newHandlerWithExtractor(appContext context.Context, auth basicAuthConfig, logger *slog.Logger, extractor pdfcsv.Extractor) http.Handler {
 	protected := http.NewServeMux()
 	protected.HandleFunc("GET /{$}", serveIndex)
 	protected.HandleFunc("GET /ws", func(w http.ResponseWriter, r *http.Request) {
-		serveWebSocket(appContext, logger, w, r)
+		serveWebSocket(appContext, logger, w, r, extractor)
 	})
 
 	mux := http.NewServeMux()
@@ -117,7 +125,7 @@ func securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
-func serveWebSocket(appContext context.Context, logger *slog.Logger, w http.ResponseWriter, r *http.Request) {
+func serveWebSocket(appContext context.Context, logger *slog.Logger, w http.ResponseWriter, r *http.Request, extractor pdfcsv.Extractor) {
 	connection, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		CompressionMode: websocket.CompressionDisabled,
 	})
@@ -129,11 +137,11 @@ func serveWebSocket(appContext context.Context, logger *slog.Logger, w http.Resp
 	connection.SetReadLimit(maxMessageBytes)
 	started := time.Now()
 	logger.Info("websocket_connected")
-	runSession(appContext, logger, connection)
+	runSession(appContext, logger, connection, extractor)
 	logger.Info("websocket_disconnected", "duration_ms", time.Since(started).Milliseconds())
 }
 
-func runSession(appContext context.Context, logger *slog.Logger, connection socket) {
+func runSession(appContext context.Context, logger *slog.Logger, connection socket, extractor pdfcsv.Extractor) {
 	ctx, cancel := context.WithCancel(appContext)
 	heartbeatFinished := make(chan struct{})
 	go func() {
@@ -147,21 +155,65 @@ func runSession(appContext context.Context, logger *slog.Logger, connection sock
 	}()
 
 	if err := writeServerMessage(ctx, connection, serverMessage{
-		Type:    "ready",
-		Message: "Connected and ready",
+		Type:     "ready",
+		Message:  "Connected and ready",
+		PDFToCSV: extractor != nil,
 	}); err != nil {
 		return
 	}
 
+	// Keep reading control frames while a conversion runs. Permit one queued
+	// request; reject excess work rather than buffering uploads indefinitely.
+	queued := &queuedSocket{socket: connection, messages: make(chan socketMessage, 1)}
+	readerFinished := make(chan struct{})
+	go func() {
+		defer close(readerFinished)
+		defer cancel()
+		for {
+			kind, data, err := connection.Read(ctx)
+			if err != nil {
+				return
+			}
+			select {
+			case queued.messages <- socketMessage{kind, data}:
+			default:
+				return
+			}
+		}
+	}()
+	defer func() {
+		cancel()
+		_ = connection.CloseNow()
+		<-readerFinished
+	}()
 	for {
-		keepGoing, err := handleNextRequest(ctx, logger, connection)
+		keepGoing, err := handleNextRequest(ctx, logger, queued, extractor)
 		if err != nil || !keepGoing {
 			return
 		}
 	}
 }
 
-func handleNextRequest(appContext context.Context, logger *slog.Logger, connection socket) (bool, error) {
+type socketMessage struct {
+	kind websocket.MessageType
+	data []byte
+}
+
+type queuedSocket struct {
+	socket
+	messages chan socketMessage
+}
+
+func (s *queuedSocket) Read(ctx context.Context) (websocket.MessageType, []byte, error) {
+	select {
+	case message := <-s.messages:
+		return message.kind, message.data, nil
+	case <-ctx.Done():
+		return 0, nil, ctx.Err()
+	}
+}
+
+func handleNextRequest(appContext context.Context, logger *slog.Logger, connection socket, extractor pdfcsv.Extractor) (bool, error) {
 	messageType, data, err := connection.Read(appContext)
 	if err != nil {
 		return false, nil
@@ -180,7 +232,7 @@ func handleNextRequest(appContext context.Context, logger *slog.Logger, connecti
 			Error: "request is not valid JSON",
 		})
 	}
-	if request.Type != "convert" {
+	if request.Type != "convert" && request.Type != "pdf-to-csv" {
 		return true, writeServerMessage(appContext, connection, serverMessage{
 			Type:  "error",
 			ID:    request.ID,
@@ -193,10 +245,14 @@ func handleNextRequest(appContext context.Context, logger *slog.Logger, connecti
 			Error: "request id must contain 1 to 64 characters",
 		})
 	}
+	status := "Converting CSV to PDF"
+	if request.Type == "pdf-to-csv" {
+		status = "Extracting table from PDF…"
+	}
 	if err := writeServerMessage(appContext, connection, serverMessage{
 		Type:    "status",
 		ID:      request.ID,
-		Message: "Converting CSV to PDF",
+		Message: status,
 	}); err != nil {
 		return false, err
 	}
@@ -205,10 +261,16 @@ func handleNextRequest(appContext context.Context, logger *slog.Logger, connecti
 	logger.Info(
 		"conversion_started",
 		"request_id", request.ID,
+		"direction", request.Type,
 		"csv_bytes", len(request.CSV),
 		"logo_base64_bytes", len(request.LogoBase64),
 	)
-	pdf, err := convertPDF(appContext, request)
+	var output []byte
+	if request.Type == "pdf-to-csv" {
+		output, err = convertCSV(appContext, request, extractor)
+	} else {
+		output, err = convertPDF(appContext, request)
+	}
 	if err != nil {
 		logger.Warn(
 			"conversion_failed",
@@ -226,9 +288,42 @@ func handleNextRequest(appContext context.Context, logger *slog.Logger, connecti
 		"conversion_completed",
 		"request_id", request.ID,
 		"duration_ms", time.Since(started).Milliseconds(),
-		"pdf_bytes", len(pdf),
+		"output_bytes", len(output),
 	)
-	return true, connection.Write(appContext, websocket.MessageBinary, pdf)
+	return true, connection.Write(appContext, websocket.MessageBinary, output)
+}
+
+func convertCSV(appContext context.Context, request convertRequest, extractor pdfcsv.Extractor) ([]byte, error) {
+	if err := appContext.Err(); err != nil {
+		return nil, err
+	}
+	if extractor == nil {
+		return nil, errors.New("PDF to CSV is unavailable: configure OPENAI_API_KEY on the server")
+	}
+	// Validate before spending an API request. Reuse delimiter validation.
+	options, err := (convertRequest{Delimiter: request.Delimiter}).options()
+	if err != nil {
+		return nil, err
+	}
+	if options.Comma == '"' || options.Comma == '\r' || options.Comma == '\n' || options.Comma == 0 || options.Comma == utf8.RuneError {
+		return nil, errors.New("invalid CSV delimiter")
+	}
+	if len(request.PDFBase64) > base64.StdEncoding.EncodedLen(pdfcsv.MaxPDFBytes) {
+		return nil, errors.New("PDF must be 10 MiB or smaller")
+	}
+	pdf, err := base64.StdEncoding.DecodeString(request.PDFBase64)
+	if err != nil {
+		return nil, errors.New("PDF is not valid base64")
+	}
+	ctx, cancel := context.WithTimeout(appContext, 3*time.Minute)
+	defer cancel()
+	var output bytes.Buffer
+	if err := pdfcsv.Convert(ctx, &output, bytes.NewReader(pdf), extractor, pdfcsv.Options{Comma: options.Comma}); err != nil {
+		// Provider errors can include request or account details. Keep them out
+		// of browser messages and application logs.
+		return nil, errors.New("PDF extraction failed. Check the PDF and server API configuration, then try again")
+	}
+	return output.Bytes(), nil
 }
 
 func convertPDF(appContext context.Context, request convertRequest) ([]byte, error) {

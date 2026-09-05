@@ -10,6 +10,8 @@ services:
     autoDeployTrigger: checksPass
     # maxShutdownDelaySeconds: 15 # Not supported on free plan
     envVars:
+      - key: OPENAI_API_KEY
+        sync: false
       - key: BASIC_AUTH_USERNAME
         sync: false
       - key: BASIC_AUTH_PASSWORD

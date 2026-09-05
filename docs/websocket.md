@@ -13,10 +13,13 @@ conversion at a time, but any number of conversions can use the same session.
 Immediately after connection, the server sends a JSON text message:
 
 ```json
-{"type":"ready","message":"Connected and ready"}
+{"type":"ready","message":"Connected and ready","pdf_to_csv":true}
 ```
 
 ## Conversion request
+
+`pdf_to_csv` is omitted when the server has no OpenAI API key. Clients should
+disable reverse conversion in that case.
 
 The client sends a JSON text message with a unique ID:
 
@@ -45,6 +48,22 @@ The next message is the generated PDF as a binary WebSocket message. Because
 the protocol allows only one in-flight job per browser session, that binary
 message belongs to the active job. After receiving it, the page remains
 connected and ready for another conversion.
+
+## PDF → CSV request
+
+```json
+{"type":"pdf-to-csv","id":"reverse-1","delimiter":",","pdf_base64":"JVBERi0..."}
+```
+
+`pdf_base64` is standard Base64 without a data URL prefix. The decoded PDF is
+limited to 10 MiB. The server sends a `status` message with the request ID,
+followed by CSV bytes as a binary message, or a JSON `error`. The output delimiter
+defaults to comma. Provider errors are replaced with a generic message.
+
+Requests run sequentially. The server continues reading control frames during
+extraction, allows one queued request, and closes connections that exceed that
+queue. Disconnecting cancels the active extraction. PDF extraction has a
+three-minute deadline; CSV → PDF keeps its 45-second deadline.
 
 ## Error message
 

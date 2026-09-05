@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/vimutter/rowpress-lab/pdfcsv"
 )
 
 const (
@@ -62,7 +64,7 @@ func runServerWith(
 	}
 
 	server := &http.Server{
-		Handler:           newHandler(ctx, auth, logger),
+		Handler:           newHandlerWithExtractor(ctx, auth, logger, extractorFromEnvironment()),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -74,6 +76,15 @@ func runServerWith(
 	}
 	logger.Info("server_stopped")
 	return 0
+}
+
+func extractorFromEnvironment() pdfcsv.Extractor {
+	key := strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
+	if key == "" {
+		return nil
+	}
+	extractor, _ := pdfcsv.NewOpenAIExtractor(pdfcsv.OpenAIOptions{APIKey: key, Model: os.Getenv("OPENAI_MODEL")})
+	return extractor
 }
 
 func newLogger(output io.Writer) *slog.Logger {

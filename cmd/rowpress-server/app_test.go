@@ -24,7 +24,7 @@ func TestHTTPRoutesAndSecurityHeaders(t *testing.T) {
 
 	index := httptest.NewRecorder()
 	handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/", nil))
-	if index.Code != http.StatusOK || !strings.Contains(index.Body.String(), "CSV → polished PDF") {
+	if index.Code != http.StatusOK || !strings.Contains(index.Body.String(), "CSV ↔ PDF") {
 		t.Fatalf("GET / = %d %q", index.Code, index.Body.String())
 	}
 	if index.Header().Get("Content-Security-Policy") == "" || index.Header().Get("X-Content-Type-Options") != "nosniff" {
@@ -231,7 +231,7 @@ func TestHandleNextRequestReturnsWriteErrors(t *testing.T) {
 		reads:        []fakeRead{{messageType: websocket.MessageText, data: request}},
 		writeErrorAt: 1,
 	}
-	keepGoing, err := handleNextRequest(context.Background(), newLogger(io.Discard), connection)
+	keepGoing, err := handleNextRequest(context.Background(), newLogger(io.Discard), connection, nil)
 	if keepGoing || err == nil {
 		t.Fatalf("handleNextRequest() = %v, %v; want write error", keepGoing, err)
 	}
@@ -240,7 +240,7 @@ func TestHandleNextRequestReturnsWriteErrors(t *testing.T) {
 		reads:        []fakeRead{{messageType: websocket.MessageText, data: request}},
 		writeErrorAt: 2,
 	}
-	keepGoing, err = handleNextRequest(context.Background(), newLogger(io.Discard), connection)
+	keepGoing, err = handleNextRequest(context.Background(), newLogger(io.Discard), connection, nil)
 	if !keepGoing || err == nil {
 		t.Fatalf("handleNextRequest() = %v, %v; want PDF write error", keepGoing, err)
 	}
@@ -253,7 +253,7 @@ func TestConversionLogsMetadataNotCSVContents(t *testing.T) {
 	}
 	var logs strings.Builder
 
-	keepGoing, err := handleNextRequest(context.Background(), newLogger(&logs), connection)
+	keepGoing, err := handleNextRequest(context.Background(), newLogger(&logs), connection, nil)
 	if err != nil || !keepGoing {
 		t.Fatalf("handleNextRequest() = %v, %v", keepGoing, err)
 	}
@@ -269,7 +269,7 @@ func TestConversionLogsMetadataNotCSVContents(t *testing.T) {
 
 func TestRunSessionStopsWhenReadyCannotBeWritten(t *testing.T) {
 	connection := &fakeSocket{writeErrorAt: 1}
-	runSession(context.Background(), newLogger(io.Discard), connection)
+	runSession(context.Background(), newLogger(io.Discard), connection, nil)
 	if connection.closeCalls == 0 {
 		t.Fatal("runSession() did not close the connection")
 	}

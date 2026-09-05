@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Turn a CSV file into a clean PDF report in seconds.">
-  <title>Rowpress · CSV to PDF</title>
+  <meta name="description" content="Create PDF reports from CSV, or extract PDF tables back to CSV.">
+  <title>Rowpress · CSV ↔ PDF</title>
   <style>
     :root {
       color-scheme: light;
@@ -86,27 +86,35 @@
     <div class="brand"><span class="brand-mark">R</span><span>rowpress</span></div>
     <section class="shell">
       <div class="intro">
-        <p class="eyebrow">CSV → polished PDF</p>
+        <p class="eyebrow">CSV ↔ PDF</p>
         <h1>Your rows, ready to present.</h1>
-        <p class="lede">Select a CSV, optionally add your logo, and download a clean table report. No templates to wrestle with.</p>
+        <p class="lede">Turn your rows into a clean PDF report, or bring a PDF table back into a spreadsheet.</p>
         <p class="privacy">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg>
-          Files are processed in memory and never stored.
+          Rowpress processes files in memory. PDF extraction sends your document to OpenAI.
         </p>
       </div>
 
       <form id="converter">
         <div id="connection" class="connection"><span class="connection-dot"></span><span class="connection-label">Connecting…</span></div>
         <div class="field">
-          <label for="csv">CSV file</label>
+          <label for="direction">Conversion</label>
+          <select id="direction">
+            <option value="convert">CSV → PDF report</option>
+            <option value="pdf-to-csv" disabled>PDF → CSV table</option>
+          </select>
+          <p id="reverse-note" class="hint">PDF → CSV requires server configuration.</p>
+        </div>
+        <div class="field">
+          <label id="source-label" for="csv">CSV file</label>
           <div class="file-control">
             <input id="csv" type="file" accept=".csv,text/csv" required>
-            <span class="file-pill">Choose CSV</span>
+            <span id="source-pill" class="file-pill">Choose CSV</span>
             <span class="file-name" data-for="csv">No file selected</span>
           </div>
         </div>
 
-        <div class="field">
+        <div class="field" id="logo-field">
           <label for="logo">Logo <span class="hint">optional · PNG, JPEG or GIF</span></label>
           <div class="file-control">
             <input id="logo" type="file" accept="image/png,image/jpeg,image/gif">
@@ -116,7 +124,7 @@
         </div>
 
         <div class="row">
-          <div class="field">
+          <div class="field" id="title-field">
             <label for="title">Report title</label>
             <input id="title" type="text" maxlength="200" placeholder="CSV export">
           </div>
@@ -141,6 +149,8 @@
     const form = document.querySelector('#converter');
     const csvInput = document.querySelector('#csv');
     const logoInput = document.querySelector('#logo');
+    const direction = document.querySelector('#direction');
+    const reverseOption = direction.querySelector('[value="pdf-to-csv"]');
     const button = document.querySelector('#submit');
     const buttonLabel = button.querySelector('.button-label');
     const status = document.querySelector('#status');
@@ -150,6 +160,21 @@
     let connected = false;
     let activeJob = null;
     let reconnectTimer;
+
+    function isReverse() { return direction.value === 'pdf-to-csv'; }
+
+    direction.addEventListener('change', () => {
+      const reverse = isReverse();
+      csvInput.value = '';
+      csvInput.accept = reverse ? '.pdf,application/pdf' : '.csv,text/csv';
+      document.querySelector('[data-for="csv"]').textContent = 'No file selected';
+      document.querySelector('#source-label').textContent = reverse ? 'PDF file · up to 10 MiB' : 'CSV file';
+      document.querySelector('#source-pill').textContent = reverse ? 'Choose PDF' : 'Choose CSV';
+      document.querySelector('#logo-field').hidden = reverse;
+      document.querySelector('#title-field').hidden = reverse;
+      setStatus(reverse ? 'Your PDF will be sent to OpenAI. Review the extracted CSV; hidden or truncated text cannot be recovered.' : 'Ready for your CSV.');
+      setBusy(false);
+    });
 
     for (const input of [csvInput, logoInput]) {
       input.addEventListener('change', () => {
@@ -169,12 +194,13 @@
     }
 
     function updateButton() {
-      button.disabled = !connected || !csvInput.files[0] || activeJob !== null;
+      button.disabled = !connected || !csvInput.files[0] || activeJob !== null || (isReverse() && reverseOption.disabled);
     }
 
     function setBusy(busy) {
       button.classList.toggle('busy', busy);
-      buttonLabel.textContent = busy ? 'Creating PDF…' : 'Create PDF';
+      buttonLabel.textContent = busy ? (isReverse() ? 'Extracting CSV…' : 'Creating PDF…') : (isReverse() ? 'Extract CSV' : 'Create PDF');
+      for (const input of form.querySelectorAll('input, select')) input.disabled = busy;
       updateButton();
     }
 
@@ -187,12 +213,13 @@
       });
     }
 
-    function downloadPDF(data, sourceName) {
-      const blob = new Blob([data], { type: 'application/pdf' });
+    function downloadResult(data, job) {
+      const reverse = job.direction === 'pdf-to-csv';
+      const blob = new Blob([data], { type: reverse ? 'text/csv;charset=utf-8' : 'application/pdf' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = sourceName.replace(/\.csv$/i, '') + '.pdf';
+      link.download = job.fileName.replace(/\.(csv|pdf)$/i, '') + (reverse ? '.csv' : '.pdf');
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -216,8 +243,8 @@
       socket.onmessage = (event) => {
         if (typeof event.data !== 'string') {
           if (!activeJob) return;
-          downloadPDF(event.data, activeJob.fileName);
-          setStatus('PDF downloaded. Choose another CSV or create it again.', 'success');
+          downloadResult(event.data, activeJob);
+          setStatus(activeJob.direction === 'pdf-to-csv' ? 'CSV downloaded. Review the extracted values before using them.' : 'PDF downloaded. Choose another file or create it again.', 'success');
           finishJob();
           return;
         }
@@ -226,9 +253,11 @@
         try { message = JSON.parse(event.data); }
         catch { return setStatus('Server returned an unreadable message.', 'error'); }
         if (message.type === 'ready') {
+          reverseOption.disabled = !message.pdf_to_csv;
+          document.querySelector('#reverse-note').textContent = message.pdf_to_csv ? 'PDF extraction uses OpenAI and may take a few minutes.' : 'PDF → CSV is unavailable until the server has an OpenAI API key.';
           connected = true;
           setConnection('Connected', 'online');
-          setStatus('Ready for your CSV.');
+          setStatus('Ready for your file.');
           updateButton();
         } else if (message.type === 'status' && activeJob?.id === message.id) {
           setStatus(message.message);
@@ -254,30 +283,36 @@
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
       const csvFile = csvInput.files[0];
-      const logoFile = logoInput.files[0];
+      const reverse = isReverse();
+      const logoFile = reverse ? null : logoInput.files[0];
       if (!csvFile || !connected || activeJob) return;
-      if (csvFile.size > 10 * 1024 * 1024) return setStatus('CSV must be 10 MiB or smaller.', 'error');
+      if (csvFile.size > 10 * 1024 * 1024) return setStatus('File must be 10 MiB or smaller.', 'error');
       if (logoFile && logoFile.size > 5 * 1024 * 1024) return setStatus('Logo must be 5 MiB or smaller.', 'error');
 
       const id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
-      activeJob = { id, fileName: csvFile.name };
+      const jobSocket = socket;
+      const job = { id, fileName: csvFile.name, direction: direction.value };
+      activeJob = job;
       setBusy(true);
       setStatus('Reading your files…');
 
       try {
         const [csv, logo] = await Promise.all([
-          csvFile.text(),
+          reverse ? readDataURL(csvFile) : csvFile.text(),
           logoFile ? readDataURL(logoFile) : Promise.resolve('')
         ]);
-        socket.send(JSON.stringify({
-          type: 'convert',
+        if (activeJob !== job || socket !== jobSocket || !connected) return;
+        jobSocket.send(JSON.stringify({
+          type: job.direction,
           id,
           title: document.querySelector('#title').value,
           delimiter: document.querySelector('#delimiter').value,
-          csv,
+          csv: reverse ? '' : csv,
+          pdf_base64: reverse ? csv.slice(csv.indexOf(',') + 1) : '',
           logo_base64: logo
         }));
       } catch (error) {
+        if (activeJob !== job) return;
         setStatus(error.message || 'Could not read the selected files.', 'error');
         finishJob();
       }

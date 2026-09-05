@@ -11,7 +11,19 @@ import (
 	"testing"
 
 	"github.com/vimutter/rowpress-lab/csvpdf"
+	"github.com/vimutter/rowpress-lab/pdfcsv"
 )
+
+type fakeExtractor struct {
+	rows     [][]string
+	err      error
+	filename string
+}
+
+func (extractor *fakeExtractor) Extract(_ context.Context, _ []byte, filename string) ([][]string, error) {
+	extractor.filename = filename
+	return extractor.rows, extractor.err
+}
 
 func TestRunConvertsStandardStreams(t *testing.T) {
 	var stdout bytes.Buffer
@@ -19,7 +31,7 @@ func TestRunConvertsStandardStreams(t *testing.T) {
 
 	exitCode := run(
 		context.Background(),
-		[]string{"-title", "Scores"},
+		[]string{"csv-to-pdf", "-title", "Scores"},
 		strings.NewReader("name,score\nAda,10\n"),
 		&stdout,
 		&stderr,
@@ -33,6 +45,161 @@ func TestRunConvertsStandardStreams(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestCLIRoundTripCSVToPDFToCSV(t *testing.T) {
+	original := "name,note\nAda,\"hello, world\"\nLinus,plain\n"
+	var pdf bytes.Buffer
+	var stderr bytes.Buffer
+	if code := run(
+		context.Background(),
+		[]string{"csv-to-pdf", "-title", "Round trip"},
+		strings.NewReader(original),
+		&pdf,
+		&stderr,
+	); code != 0 {
+		t.Fatalf("forward exit code = %d; stderr = %q", code, stderr.String())
+	}
+
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	extractor := &fakeExtractor{rows: [][]string{
+		{"name", "note"},
+		{"Ada", "hello, world"},
+		{"Linus", "plain"},
+	}}
+	factory := func(apiKey, model string) (pdfcsv.Extractor, error) {
+		if apiKey != "test-key" || model != pdfcsv.DefaultModel {
+			t.Fatalf("OpenAI configuration = %q, %q", apiKey, model)
+		}
+		return extractor, nil
+	}
+	var recovered bytes.Buffer
+	stderr.Reset()
+	code := runWithDependencies(
+		context.Background(),
+		[]string{"pdf-to-csv"},
+		bytes.NewReader(pdf.Bytes()),
+		&recovered,
+		&stderr,
+		openOutput,
+		factory,
+	)
+	if code != 0 {
+		t.Fatalf("reverse exit code = %d; stderr = %q", code, stderr.String())
+	}
+	if recovered.String() != original {
+		t.Fatalf("recovered CSV = %q, want %q", recovered.String(), original)
+	}
+	if extractor.filename != "document.pdf" {
+		t.Fatalf("extractor filename = %q", extractor.filename)
+	}
+}
+
+func TestPDFToCSVUsesFileNameDelimiterAndModel(t *testing.T) {
+	directory := t.TempDir()
+	inputPath := filepath.Join(directory, "source-report.pdf")
+	outputPath := filepath.Join(directory, "recovered.csv")
+	if err := os.WriteFile(inputPath, []byte("%PDF-demo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("OPENAI_MODEL", "environment-model")
+	extractor := &fakeExtractor{rows: [][]string{{"name", "score"}, {"Ada", "10"}}}
+	factory := func(_, model string) (pdfcsv.Extractor, error) {
+		if model != "flag-model" {
+			t.Fatalf("model = %q", model)
+		}
+		return extractor, nil
+	}
+	var stderr bytes.Buffer
+	code := runWithDependencies(
+		context.Background(),
+		[]string{"pdf-to-csv", "-input", inputPath, "-output", outputPath, "-delimiter", ";", "-model", "flag-model"},
+		strings.NewReader("unused"),
+		&bytes.Buffer{},
+		&stderr,
+		openOutput,
+		factory,
+	)
+	if code != 0 {
+		t.Fatalf("exit code = %d; stderr = %q", code, stderr.String())
+	}
+	output, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(output) != "name;score\nAda;10\n" || extractor.filename != "source-report.pdf" {
+		t.Fatalf("CSV/filename = %q/%q", output, extractor.filename)
+	}
+}
+
+func TestPDFToCSVRequiresAPIKeyAndReportsConfigurationError(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "")
+	var stderr bytes.Buffer
+	code := run(
+		context.Background(),
+		[]string{"pdf-to-csv"},
+		strings.NewReader("%PDF-demo"),
+		&bytes.Buffer{},
+		&stderr,
+	)
+	if code != 1 || !strings.Contains(stderr.String(), "OPENAI_API_KEY") {
+		t.Fatalf("missing-key result = %d, %q", code, stderr.String())
+	}
+
+	t.Setenv("OPENAI_API_KEY", "key")
+	stderr.Reset()
+	want := errors.New("invalid client")
+	code = runWithDependencies(
+		context.Background(),
+		[]string{"pdf-to-csv"},
+		strings.NewReader("%PDF-demo"),
+		&bytes.Buffer{},
+		&stderr,
+		openOutput,
+		func(string, string) (pdfcsv.Extractor, error) { return nil, want },
+	)
+	if code != 1 || !strings.Contains(stderr.String(), "configure OpenAI") {
+		t.Fatalf("factory-error result = %d, %q", code, stderr.String())
+	}
+}
+
+func TestPDFToCSVReportsExtractionError(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "key")
+	extractor := &fakeExtractor{err: errors.New("model failed")}
+	var stderr bytes.Buffer
+	code := runWithDependencies(
+		context.Background(),
+		[]string{"pdf-to-csv"},
+		strings.NewReader("%PDF-demo"),
+		&bytes.Buffer{},
+		&stderr,
+		openOutput,
+		func(string, string) (pdfcsv.Extractor, error) { return extractor, nil },
+	)
+	if code != 1 || !strings.Contains(stderr.String(), "model failed") {
+		t.Fatalf("extraction-error result = %d, %q", code, stderr.String())
+	}
+}
+
+func TestPDFToCSVModelDefaultsFromEnvironment(t *testing.T) {
+	t.Setenv("OPENAI_MODEL", "")
+	cfg, err := parseFlags([]string{"pdf-to-csv"}, io.Discard)
+	if err != nil || cfg.model != pdfcsv.DefaultModel {
+		t.Fatalf("default model = %q, %v", cfg.model, err)
+	}
+	t.Setenv("OPENAI_MODEL", "environment-model")
+	cfg, err = parseFlags([]string{"pdf-to-csv"}, io.Discard)
+	if err != nil || cfg.model != "environment-model" {
+		t.Fatalf("environment model = %q, %v", cfg.model, err)
+	}
+}
+
+func TestNewOpenAIExtractor(t *testing.T) {
+	extractor, err := newOpenAIExtractor("key", "model")
+	if err != nil || extractor == nil {
+		t.Fatalf("newOpenAIExtractor() = %#v, %v", extractor, err)
 	}
 }
 
